@@ -1,0 +1,8 @@
+faster-whisper
+openai
+pandas
+langchain-experimental
+langchain-huggingface
+protobuf==3.20
+transformers==4.44.2
+sentencepiece
