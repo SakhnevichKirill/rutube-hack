@@ -21,7 +21,6 @@ class AudioProcesser():
         self.embedder = HuggingFaceEmbeddings(model_name='sergeyzh/rubert-tiny-turbo')
         self.splitter = SemanticChunker(self.embedder, breakpoint_threshold_type = 'percentile', breakpoint_threshold_amount=87)
         self.embedder_for_tags = HuggingFaceEmbeddings(model_name='deepvk/USER-bge-m3')
-        api_key = 'sk-or-vv-ed9b0360080c7f2ebfea7bb6d596cc6f67d2d2d8356b6cd950e66379b63c2d87'
         self.client = OpenAI(
             api_key=api_key,
             base_url="https://api.vsegpt.ru/v1",
