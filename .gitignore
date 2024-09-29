@@ -2,3 +2,9 @@ venv/
 videos/
 test_videos/
 videos.zip
+test_dataset_test_tag_video.zip
+your_file.csv
+__pycache__
+models/__pycache__
+output_tags.csv
+production_rag_validation.ipynb

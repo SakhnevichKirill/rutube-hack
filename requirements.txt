@@ -6,3 +6,6 @@ langchain-huggingface
 protobuf==3.20
 transformers==4.44.2
 sentencepiece
+fastapi
+uvicorn
+python-multipart
