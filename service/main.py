@@ -243,8 +243,8 @@ async def get_tags(video_description: str, file: UploadFile = File(...)):
         client.start(temp_file_path)
         
         while not client.manager.is_completed_progress:
-            transcription_data = client.manager.buffer
             print(f"{client.manager.recieve_progress / client.manager.send_progress} proccessing...")
+        transcription_data = client.manager.buffer
         """
         async with httpx.AsyncClient() as client:
             response = await client.post(url, file=temp_file_path)
