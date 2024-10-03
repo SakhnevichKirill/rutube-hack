@@ -21,6 +21,22 @@ import numpy as np
 import json
 from moviepy.editor import *
 
+from faster_whisper import WhisperModel
+from transformers import pipeline, AutoTokenizer
+import torch
+from langchain_experimental.text_splitter import SemanticChunker
+from langchain_huggingface.embeddings import HuggingFaceEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+from openai import OpenAI
+import openai
+import pandas as pd
+import os
+import re
+import cv2
+
+
 class AudioProcesser():
     def __init__(self):
         self.whisper_model = WhisperModel('Systran/faster-whisper-large-v3', device='cuda')
@@ -52,7 +68,7 @@ class AudioProcesser():
             if not tags:
                 return []
             return [tag.strip() for tag in tags.split(',') if tag.strip()]
-        except:
+        except openai.error.PermissionDeniedError:
             print(f"Модерация отклонила запрос для чанка: {video_description}")
             return []
     def process_video(self, file, video_description):
@@ -88,17 +104,36 @@ class AudioProcesser():
         
         return file_tags
     
-    def get_nearest_tags(self, file_tags, rutube_tags, video_description, similarity_threshold=0.5, top_n=3):
-        if len(file_tags)>0:
+    def get_nearest_tags(self, file_tags, rutube_tags, video_description, similarity_threshold=0.485, top_n=3):
+        if len(file_tags) > 0:
             combined_tags = ', '.join(file_tags)
+        else:
+            combined_tags = ""
+        print(combined_tags)
         combined_tags += f', {video_description}'
+
         generated_embedding = self.embedder_for_tags.embed_query(combined_tags)
         available_tag_embeddings = self.embedder_for_tags.embed_documents(rutube_tags)
+        
+        # Вычисляем сходства
         similarities = cosine_similarity([generated_embedding], available_tag_embeddings)[0]
+        
+        # Собираем теги и их сходства, превышающие порог
         nearest_tags = [(rutube_tags[i], similarities[i]) for i in range(len(rutube_tags)) if similarities[i] > similarity_threshold]
+        
+        # Сортируем по сходству
         nearest_tags = sorted(nearest_tags, key=lambda x: x[1], reverse=True)
+
+        # Проверяем, есть ли хотя бы один тег, который превышает порог
+        if not nearest_tags:
+            # Если ни один тег не превышает порог, возвращаем тег с максимальным сходством
+            max_similarity_index = similarities.argmax()  # Индекс тега с максимальным сходством
+            return [rutube_tags[max_similarity_index]]
+        
+        # Если есть теги, возвращаем top_n подходящих
         nearest_tags = nearest_tags[:top_n]
         return [tag for tag, similarity in nearest_tags]
+
 
 class VideoCaptioningModel:
     def __init__(self):
@@ -209,6 +244,7 @@ class Caption():
 
 def find_tags(df, target_tags):
     collected_tags = {}
+    
     for tag in target_tags:
         if tag in df['Уровень 3 (iab)'].values:
             rows = df[df['Уровень 3 (iab)'] == tag]
@@ -222,6 +258,7 @@ def find_tags(df, target_tags):
                     if level2 not in collected_tags[level1]:
                         collected_tags[level1][level2] = set()
                     collected_tags[level1][level2].add(level3)
+                    
         elif tag in df['Уровень 2 (iab)'].values:
             rows = df[df['Уровень 2 (iab)'] == tag]
             if not rows.empty:
@@ -230,31 +267,45 @@ def find_tags(df, target_tags):
                     level2 = row_data['Уровень 2 (iab)']
                     if level1 not in collected_tags:
                         collected_tags[level1] = {}
-                    collected_tags[level1][level2] = set()
+                    if level2 not in collected_tags[level1]:
+                        collected_tags[level1][level2] = set()
+                    
         elif tag in df['Уровень 1 (iab)'].values:
-            rows = df[df['Уровень 1 (iab)'] == tag]
-            if not rows.empty:
-                for _, row_data in rows.iterrows():
-                    level1 = row_data['Уровень 1 (iab)']
-                    if level1 not in collected_tags:
-                        collected_tags[level1] = {}
-    
+            level1 = tag  # Здесь tag - это уровень 1
+            if level1 not in collected_tags:
+                collected_tags[level1] = {}
+
     # Преобразуем собранные теги в нужный формат
     result = []
     for level1, level2_tags in collected_tags.items():
-        for level2, level3_tags in level2_tags.items():
-            if level3_tags:
-                for level3 in level3_tags:
-                    result.append(f'{level1}: {level2}: {level3}')
-            else:
-                result.append(f'{level1}: {level2}')
-    
+        if not level2_tags:
+            # Если нет связанных тегов 2 уровня, просто добавляем тег 1 уровня
+            result.append(level1)
+        else:
+            for level2, level3_tags in level2_tags.items():
+                result.append(f'{level1}: {level2}')  # Добавляем уровень 2
+                if level3_tags:
+                    for level3 in level3_tags:
+                        result.append(f'{level1}: {level2}: {level3}')  # Добавляем уровень 3
+
     return ', '.join(result)
+
+from moviepy.video.io.ffmpeg_tools import ffmpeg_extract_subclip
+
+def trim_video(input_file, output_file, start_time, end_time):
+    try:
+        # Обрезаем видео с использованием moviepy
+        ffmpeg_extract_subclip(input_file, start_time, end_time, targetname=output_file)
+        print(f"Сохранено обрезанное видео: {output_file}")
+    except Exception as e:
+        print(f"Произошла ошибка при обрезке видео: {str(e)}")
+
+
 if __name__ == '__main__':
     audio_processer = AudioProcesser()
     video_processer = Caption()
-    df = pd.read_csv('/home/ubuntu/rutube-hack/baseline/IAB_tags.csv')
-    video_dir = '/home/ubuntu/rutube-hack/test_videos'
+    df = pd.read_csv('/home/ubuntu/rutube-hack/test_tag_video (2)/IAB_tags.csv')
+    video_dir = '/home/ubuntu/rutube-hack/test_tag_video (2)/videos'
     output_file = 'output_tags.csv'  # Путь к выходному CSV файлу
 
     # Открываем CSV файл для записи результатов
@@ -264,7 +315,7 @@ if __name__ == '__main__':
         csv_writer.writerow(['video_id', 'result_tags'])
 
         # Открываем исходный CSV файл
-        with open('your_file.csv', mode='r', encoding='utf-8') as csvfile:
+        with open('/home/ubuntu/rutube-hack/test_tag_video (2)/sample_submission.csv', mode='r', encoding='utf-8') as csvfile:
             csv_reader = csv.DictReader(csvfile)  # Читаем файл как словарь с заголовками
 
             # Проходим по каждой строке в CSV
@@ -274,7 +325,9 @@ if __name__ == '__main__':
                 description = row['description']
                 video_description = f'{title}. {description}'
                 video_file_path = os.path.join(video_dir, f'{video_id}.mp4')
-
+                output_video_file_path = os.path.join(video_dir, f'trimmed_{video_id}.mp4')
+                trim_video(video_file_path, output_video_file_path, 0, 130)
+                video_file_path = output_video_file_path
                 if os.path.exists(video_file_path):
                     tags = audio_processer.process_video(video_file_path, video_description)
                     video_caption = video_processer.shot_transit(video_file_path)
@@ -282,6 +335,7 @@ if __name__ == '__main__':
                     video_caption =" ".join(item['caption'] for item in data)
                     video_tags = audio_processer.generate_tags(video_caption, video_description)
                     tags.update(video_tags)
+                    print(tags)
                     rutube_tags = []
                     tag_path = 'tag_list.txt'
                     
@@ -295,5 +349,5 @@ if __name__ == '__main__':
                     res = find_tags(df, result_tags)
                     print(res)
                     # Записываем video_id и результат тегов в новый CSV
-                    csv_writer.writerow([video_id, ', '.join(res)])  # Объединяем теги в строку
+                    csv_writer.writerow([video_id, res])  # Объединяем теги в строку
             
