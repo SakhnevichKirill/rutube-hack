@@ -1,6 +1,8 @@
 from typing import List
 from schemes import TranscribationItem, TranscribationRequest
 from sentence_transformers import SentenceTransformer
+from langchain_experimental.text_splitter import SemanticChunker
+from langchain_huggingface.embeddings import HuggingFaceEmbeddings
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import pandas as pd
@@ -16,7 +18,9 @@ class TranscriptionChunker:
         :param threshold: Порог косинусной близости для объединения транскрипций.
         '''
         self.model = SentenceTransformer(model_name)
+        self.semantic_embedder = HuggingFaceEmbeddings(model_name=model_name)
         self.threshold = threshold
+        self.chunker = SemanticChunker(self.semantic_embedder, breakpoint_threshold_type = 'percentile', breakpoint_threshold_amount=85)
 
     def calculate_cosine_similarity(self, text1: str, text2: str) -> float:
         '''Вычисляем косинусную близость между двумя текстами с помощью эмбеддингов.'''
@@ -31,36 +35,7 @@ class TranscriptionChunker:
 
     def chunk_transcriptions(self, transcriptions: List[TranscribationItem]) -> List[TranscribationItem]:
         '''Функция для объединения транскрипций на основе косинусной близости.'''
-        
-        if not transcriptions:
-            return []
-        
-        # Инициализируем список для чанков
-        chunked_transcriptions = []
-        
-        # Инициализируем первый чанк
-        current_chunk = transcriptions[0]
-        
-        # Проходим по всем транскрипциям
-        for i in range(1, len(transcriptions)):
-            current = transcriptions[i]
-            
-            # Вычисляем косинусную близость между текущей транскрипцией и текущим чанком
-            similarity = self.calculate_cosine_similarity(current.transcribation, current_chunk.transcribation)
-            
-            # Если косинусная близость выше порога, объединяем транскрипции
-            if similarity >= self.threshold:
-                # Обновляем только конечный интервал текущего чанка
-                current_chunk.end_interval = current.end_interval
-            else:
-                # Добавляем текущий чанк в список
-                chunked_transcriptions.append(current_chunk)
-                # Создаем новый чанк
-                current_chunk = current
-        
-        # Добавляем последний чанк
-        chunked_transcriptions.append(current_chunk)
-        
+        chunked_transcriptions = self.splitter.split_text(transcriptions)
         return chunked_transcriptions
 
     def filter_chunks(self, chunks: List[TranscribationItem], target_tags: str) -> List[TranscribationItem]:
