@@ -58,7 +58,7 @@ class Caption():
                      input_file,
                      threshold: int=0.7):
         cap = cv2.VideoCapture(input_file)
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        fps = cap.get(cv2.CAP_PROP_FPS)+1
         duration = round(cap.get(cv2.CAP_PROP_FRAME_COUNT) / fps)
 
         previous_hist = None

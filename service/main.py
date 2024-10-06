@@ -24,6 +24,7 @@ from diart import sources
 from diart.utils import encode_audio
 import dotenv
 import threading
+from threading import Event
 import pyttsx3
 from pydub import AudioSegment
 from pydub.playback import play
@@ -33,13 +34,14 @@ app = FastAPI()
 url = 'сервис макса для транскрибации'
 
 target_tags = [] # потом будем получать из бд
-tag_path = 'tag_list.txt'
+tag_path = '../tag_list.txt'
 with open(tag_path, 'r', encoding='utf-8') as file:
     for line in file:
         target_tags.append(line.strip())
 chunker = TranscriptionChunker()
 video_processer = Caption()
-llm = LLM()
+api_key = os.environ.get('OPENAI_API_KEY')
+llm = LLM(api_key=api_key)
 
 # Загрузка пути к папке с аудио
 AUDIO_FOLDER_PATH = os.environ.get("AUDIO_FOLDER_PATH")
@@ -50,67 +52,12 @@ if AUDIO_FOLDER_PATH[-1] == "/":
 
 class AssistantManager:
     def __init__(self):
-        # Определение доступных действий
-        self.talk_moves = {
-            'negative_valence_monitoring_cognition': [
-                "feel_stuck", "better_understanding", "reflecting", "current_approach"
-            ],
-            'issue_conceptual_understanding': [
-                "confusion", "key_concepts", "tools"
-            ],
-            'lack_shared_perspective': [
-                "progress_group", "joint_plan", "accomplish_group"
-            ],
-        }
-
-        # Организация путей к аудио файлам
-        self.audio_files = {}
-        for talk_move in self.talk_moves:
-            self.audio_files[talk_move] = {}
-            for variation in self.talk_moves[talk_move]:
-                self.audio_files[talk_move][variation] = f"{AUDIO_FOLDER_PATH}/{variation}.mp3"
-
-        # Инициализация Text-to-Speech (tts) движка
-        self.tts = pyttsx3.init()
-
-        # Установка свойств перед добавлением текста для озвучивания
-        # Скорость озвучивания (может превышать 100)
-        self.tts.setProperty('rate', 130)
-        self.tts.setProperty('volume', 0.9)  # Громкость от 0 до 1
-        voices = self.tts.getProperty('voices')
-        self.tts.setProperty('voice', voices[1].id)  # Установка голоса
-
         self.buffer = ""
         self.send_progress = 0
         self.recieve_progress = 0
         self.is_completed_progress = False
-
-
-    def play_audio(self, talk_move):
-        """
-        Проигрывание аудио файла, связанного с конкретным действием.
-        """
-        try:
-            # Выбор случайной вариации действия
-            variation = random.choice(self.talk_moves[talk_move])
-            file_path = self.audio_files[talk_move][variation]
-            # Проигрывание аудио
-            play(AudioSegment.from_mp3(file_path))
-        except:
-            print(f"ERROR: Audio file not found for the talk_move {talk_move}")
-            pass
-
-    def say(self, text):
-        """
-        Озвучивание текста с помощью TTS.
-        """
-        self.tts.say(text)
-
-    def runAndWait(self):
-        """
-        Запуск TTS и ожидание завершения озвучивания.
-        """
-        self.tts.runAndWait()
+        self.receive_complete_event = Event()
+        self.send_complete_event = Event()
 
     def listen_server(self, ws, should_continue):
         """
@@ -119,23 +66,16 @@ class AssistantManager:
         try:
             while should_continue.is_set():
                 message = ws.recv()  # Получаем сообщение
-                print(f"Received message from server: {message}")
-            
-                try:
-                    output = json.loads(message)  # Пробуем распарсить JSON
-                    print(f"Parsed output: {output}")
-
-                    # Проверка на наличие ответа и аудио
-                    if output.get('response'):
-                        self.play_audio(output.get('selected_move', 'default_move'))
-                    elif 'test test' in output.get('transcription', '').lower().replace(",", ""):
-                        self.play_audio('issue_conceptual_understanding')
-
-                except json.JSONDecodeError:
-                    print(f"Received non-JSON message: {message}")  # Это для случаев, когда сообщение не JSON
-
-                self.buffer = message
-                self.update_recieve_progress()
+                output = json.loads(message)  # Пробуем распарсить JSON
+                # Проверка на наличие ответа и аудио
+                if "result" in output:
+                    transcribations_json = output.get('result', [])
+                    transcribations = [json.loads(x) for x in transcribations_json]
+                    self.buffer = transcribations
+                    self.update_receive_progress()
+                if 'annotations' in output:
+                    # Получили неинформативную строку с аннотациями
+                    continue
             
         except Exception as e:
             print(f"Error while receiving message: {e}")
@@ -146,12 +86,16 @@ class AssistantManager:
         print(f"Send progress updated: {self.send_progress}")
         return args
 
-    def update_recieve_progress(self, *args):
+    def update_receive_progress(self, *args):
         self.recieve_progress += 1
         print(f"Receive progress updated: {self.recieve_progress}")
-        if self.recieve_progress == self.send_progress:
-            self.is_completed_progress = 1
-        return args
+        # Проверяем оба условия: завершение отправки и получение всех данных
+        if self.recieve_progress == self.send_progress and self.send_complete_event.is_set():
+            self.is_completed_progress = True
+            self.receive_complete_event.set()
+
+    def wait_for_completion(self):
+        self.receive_complete_event.wait()  # Ждем завершения процесса
     
     def reset_progress(self):
         self.recieve_progress = 0
@@ -167,10 +111,10 @@ class AssistantManager:
                 print("Error: No audio source provided.")
                 return
 
-        # Create audio source
+            # Create audio source
             source_components = source.split(":")
         
-        # Проверка, если source не "microphone"
+            # Проверка, если source не "microphone"
             if source_components[0] != "microphone":
                 audio_source = sources.FileAudioSource(
                     source, sample_rate, block_duration=step)
@@ -182,12 +126,21 @@ class AssistantManager:
             # Encode audio, then send through websocket
             audio_source.stream.pipe(
                 ops.map(sources.utils.encode_audio),
-                ops.do_action(on_next = self.update_send_progress)
-            ).subscribe_(ws.send)
+                ops.do_action(on_next=self.update_send_progress)
+            ).subscribe_(
+                ws.send, 
+                on_completed=self.mark_send_complete  # Вызов при завершении отправки
+            )
             audio_source.read()  # Начинаем чтение аудио
             print(f"Audio data sent successfully.")
         except Exception as e:
             print(f"Error while sending message: {e}")
+
+    def mark_send_complete(self):
+        """Вызывается, когда отправка всех данных завершена."""
+        print("Send process completed!")
+        self.send_complete_event.set()  # Сигнализируем о завершении отправки
+
 
 class AssistantClient:
     def __init__(self, HOST="0.0.0.0", PORT=5002):
@@ -229,78 +182,50 @@ class AssistantClient:
             sender.join()
             audio_source.close()
 
-def extract_audio_from_video(video_path):
-    """
-    Извлекает аудиодорожку из видеофайла и сохраняет её во временной директории.
-    Возвращает путь к аудиофайлу.
-    """
-    try:
-        # Создаем временную директорию
-        temp_dir = tempfile.mkdtemp()
-        # Определяем путь для временного аудиофайла
-        audio_path = os.path.join(temp_dir, "extracted_audio.wav")
-        
-        # Загружаем видеофайл с помощью moviepy
-        video = mp.VideoFileClip(video_path)
-        
-        # Извлекаем аудиодорожку
-        audio = video.audio
-        
-        # Сохраняем аудио в .wav файл
-        audio.write_audiofile(audio_path)
-        
-        print(f"Audio extracted and saved at: {audio_path}")
-        return audio_path
-    
-    except Exception as e:
-        print(f"Error extracting audio: {e}")
-        return None
-client = AssistantClient()
 
+client = AssistantClient()
 
 @app.post("/get_tags")
 async def get_tags(video_description: str, file: UploadFile = File(...)):
-    '''Сохраняем видос в временную папку, чтобы потом его можно было обработать.
-    Потом тут будет сохранение в s3, когда доделаю.'''
     with TemporaryDirectory() as temp_dir:
         temp_file_path = os.path.join(temp_dir, file.filename)
         with open(temp_file_path, "wb") as temp_file:
             temp_file.write(file.file.read())
             temp_file.flush()
-    audio_path = 'INIT_WARM.wav'
+    audio_path = '../INIT_WARM_splited.wav'
     client.start(audio_path)
     if client:
         print('Client started')
-    while not client.manager.is_completed_progress:
-        print(f"Waiting for response... Send progress: {client.manager.send_progress}, Receive progress: {client.manager.recieve_progress}")
-        time.sleep(5)
-    transcription_data = client.manager.buffer
-    print('Получили траскрибацию!!!!')
+    client.manager.receive_complete_event.wait()
+    transcription_data = client.manager.buffer[0]['text']
+    print(transcription_data)
 
 
     
-    tags_for_filter = video_description + [''' Транспорт, Книги и литература, Бизнес и финансы, Карьера, Образование,
+    tags_for_filter = video_description + ''' Транспорт, Книги и литература, Бизнес и финансы, Карьера, Образование,
                                            События и достопримечательности, Семья и отношения, Изобразительное искусство,
                                            Еда и напитки, Здоровый образ жизни, Хобби и интересы, Дом и сад,
                                            Медицина, Фильмы и анимация, Музыка и аудио, Новости и политика,
                                            Личные финансы, Животные, Массовая культура, Недвижимость,
                                            Религия и духовность, Наука, Покупки, Спорт, Стиль и красота,
-                                           Информационные технологии, Телевидение, Путешествия, Игры''']
+                                           Информационные технологии, Телевидение, Путешествия, Игры'''
     #в случае с кейсом рутуба целевые теги для фильтров состоят из тайтл + дескрипшн + целевые теги первого уровня
     # теперь нужно получить чанки, сохранив таймкоды
 
     filtered_chunks = chunker.process_transcription_request(transcription_data, tags_for_filter)
     # тут хочу сделать, чтобы в video_pipe была функция, которая может сделать описание по таймкоду:
     # start_time-end_time, а не по всему видосу
-    video_caption = video_processer.shot_transit(temp_file_path)
-    data = json.loads(video_caption)
-    video_caption =" ".join(item['caption'] for item in data)
+    # video_caption = video_processer.shot_transit('../test_videos/trimmed_1.mp4')
+    # data = json.loads(video_caption)
+    # video_caption =" ".join(item['caption'] for item in data)
     tags = set()
+    print('Чанки: ', len(filtered_chunks))
     for audio_chunk in filtered_chunks:
-        tags_for_chunk = llm.generate_tags(audio_chunk, video_caption, tags_for_filter)
-        tags.add(tags_for_chunk)
+        tags_for_chunk = llm.generate_tags(audio_chunk, tags_for_filter)
+        tags.update(tags_for_chunk)
+    print(tags)
     # получили множество тегов к каждому чанку, теперь переводим их в целевые (target_tags)
-    final_tags = chunker.get_nearest_tags(tags, target_tags, video_description, similarity_threshold=0.7, top_n=2)
+    final_tags = chunker.get_nearest_tags(tags, target_tags, similarity_threshold=0.7, top_n=2)
     return final_tags
 
 if __name__ == '__main__':

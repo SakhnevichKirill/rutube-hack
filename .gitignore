@@ -8,3 +8,5 @@ __pycache__
 models/__pycache__
 output_tags.csv
 production_rag_validation.ipynb
+service/.env
+INIT_WARM_splited.wav

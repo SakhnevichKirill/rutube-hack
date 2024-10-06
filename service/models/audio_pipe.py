@@ -10,7 +10,7 @@ import os
 
 
 class TranscriptionChunker:
-    def __init__(self, model_name: str = 'sergeyzh/rubert-tiny-turbo', threshold: float = 0.8):
+    def __init__(self, model_name: str = 'sergeyzh/rubert-tiny-turbo', threshold: float = 0.5):
         '''
         Инициализация Chunker с моделью для генерации эмбеддингов и порогом для косинусной близости.
         
@@ -35,7 +35,7 @@ class TranscriptionChunker:
 
     def chunk_transcriptions(self, transcriptions: List[TranscribationItem]) -> List[TranscribationItem]:
         '''Функция для объединения транскрипций на основе косинусной близости.'''
-        chunked_transcriptions = self.splitter.split_text(transcriptions)
+        chunked_transcriptions = self.chunker.split_text(transcriptions)
         return chunked_transcriptions
 
     def filter_chunks(self, chunks: List[TranscribationItem], target_tags: str) -> List[TranscribationItem]:
@@ -46,7 +46,7 @@ class TranscriptionChunker:
             '''TODO
             добавить векторную бд, сделать фильтрацию опциональной, если нет целевых тегов
             '''
-            similarity = self.calculate_cosine_similarity(chunk.transcribation, target_tags)
+            similarity = self.calculate_cosine_similarity(chunk, target_tags)
             if similarity >= self.threshold:  # Сравниваем с порогом
                 filtered_chunks.append(chunk)
 
@@ -54,22 +54,20 @@ class TranscriptionChunker:
 
     def process_transcription_request(self, request: TranscribationRequest, target_tags) -> TranscribationRequest:
         '''Функция для обработки запроса и возврата отфильтрованных и chunked транскрипций'''
-        chunked_transcriptions = self.chunk_transcriptions(request.transcriptions)
+        chunked_transcriptions = self.chunk_transcriptions(request)
         filtered_chunks = self.filter_chunks(chunked_transcriptions, target_tags)
-        return TranscribationRequest(transcriptions=filtered_chunks)
+        return filtered_chunks
   
     
     def get_nearest_tags(
-        self, 
+        self,
         file_tags: set,  # Теперь file_tags принимает множество
         target_tags: List[str], 
-        video_description: str, 
         similarity_threshold: float = 0.485, 
         top_n: int = 3
     ) -> List[str]:
         # Формируем объединённые теги
         combined_tags = ', '.join(file_tags)  # Преобразуем множество в строку
-        combined_tags += f', {video_description}'
 
         # Генерируем эмбеддинг для объединённых тегов
         generated_embedding = self.model.encode([combined_tags])
